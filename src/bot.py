@@ -7,7 +7,7 @@ from datetime import datetime
 # -----------------------------
 # 1. НАСТРОЙКИ
 # -----------------------------
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # теперь токен берётся из ENV
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "1311098591"))
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "1311098591"))
 
@@ -216,8 +216,9 @@ def init_db():
             mission_num INTEGER,
             standard_bonus INTEGER,
             extra_bonus INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'pending', -- pending / accepted / redo / discuss
+            status TEXT DEFAULT 'pending',
             admin_comment TEXT,
+            user_report TEXT,
             created_at TEXT
         )
         """
@@ -226,13 +227,14 @@ def init_db():
     conn.close()
 
 
-def create_report(user_id, username, chat_id, mission_num, standard_bonus):
+def create_report(user_id, username, chat_id, mission_num, standard_bonus, user_report_text):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO mission_reports (user_id, username, chat_id, mission_num, standard_bonus, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, username, chat_id, mission_num, standard_bonus, datetime.now().isoformat())
+        "INSERT INTO mission_reports (user_id, username, chat_id, mission_num, "
+        "standard_bonus, extra_bonus, status, admin_comment, user_report, created_at) "
+        "VALUES (?, ?, ?, ?, ?, 0, 'pending', '', ?, ?)",
+        (user_id, username, chat_id, mission_num, standard_bonus, user_report_text, datetime.now().isoformat())
     )
     report_id = cur.lastrowid
     conn.commit()
@@ -248,10 +250,13 @@ def update_status(report_id, status):
     conn.close()
 
 
-def add_extra_bonus(report_id, amount):
+def set_extra_and_status(report_id, extra_bonus, status):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("UPDATE mission_reports SET extra_bonus = extra_bonus + ? WHERE id = ?", (amount, report_id))
+    cur.execute(
+        "UPDATE mission_reports SET extra_bonus = ?, status = ? WHERE id = ?",
+        (extra_bonus, status, report_id)
+    )
     conn.commit()
     conn.close()
 
@@ -268,7 +273,8 @@ def get_report(report_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, user_id, username, chat_id, mission_num, standard_bonus, extra_bonus, status, admin_comment "
+        "SELECT id, user_id, username, chat_id, mission_num, standard_bonus, "
+        "extra_bonus, status, admin_comment, user_report "
         "FROM mission_reports WHERE id = ?",
         (report_id,)
     )
@@ -286,6 +292,7 @@ def get_report(report_id):
         "extra_bonus": row[6],
         "status": row[7],
         "admin_comment": row[8],
+        "user_report": row[9],
     }
 
 
@@ -305,30 +312,21 @@ def get_user_balance(user_id):
 # 4. СОСТОЯНИЕ ПОЛЬЗОВАТЕЛЕЙ
 # -----------------------------
 
-user_states = {}  # кто сейчас пишет отчёт
-admin_comment_state = {}  # {admin_user_id: report_id} — ждём текст комментария от админа
-
+user_states = {}          # отчёт пользователя (буфер)
+admin_action_state = {}   # {ADMIN_CHAT_ID: ("review" / "finish", report_id)}
 
 # -----------------------------
 # 5. ХЕЛПЕРЫ ДЛЯ КНОПОК
 # -----------------------------
 
+
 def make_admin_keyboard(report_id):
     kb = types.InlineKeyboardMarkup()
-    row1 = [
-        types.InlineKeyboardButton("✅ Принять и отправить", callback_data=f"report:{report_id}:accept"),
-        types.InlineKeyboardButton("🔁 На доработку", callback_data=f"report:{report_id}:redo"),
+    row = [
+        types.InlineKeyboardButton("✍️ Написать ревью", callback_data=f"report:{report_id}:review"),
+        types.InlineKeyboardButton("🏁 Миссия завершена", callback_data=f"report:{report_id}:finish"),
     ]
-    row2 = [
-        types.InlineKeyboardButton("+50 ₽", callback_data=f"report:{report_id}:extra50"),
-        types.InlineKeyboardButton("+100 ₽", callback_data=f"report:{report_id}:extra100"),
-    ]
-    row3 = [
-        types.InlineKeyboardButton("✍️ Коммент", callback_data=f"report:{report_id}:comment"),
-    ]
-    kb.row(*row1)
-    kb.row(*row2)
-    kb.row(*row3)
+    kb.row(*row)
     return kb
 
 
@@ -336,16 +334,22 @@ def format_report_for_admin(report):
     mission = MISSIONS.get(report["mission_num"], {})
     title = mission.get("title", f"Миссия {report['mission_num']}")
     total = report["standard_bonus"] + report["extra_bonus"]
+
     text = (
         f"📩 *ОТЧЁТ #{report['id']} ПО МИССИИ {report['mission_num']}* — {title}\n"
         f"От @{report['username'] or 'без_ника'} (id: {report['user_id']})\n\n"
+    )
+
+    if report["user_report"]:
+        text += f"{report['user_report']}\n\n"
+
+    text += (
         f"Стандартный бонус: {report['standard_bonus']}₽\n"
         f"Доп. бонус: {report['extra_bonus']}₽\n"
         f"Итого: {total}₽\n"
-        f"Статус: {report['status']}\n"
+        f"Статус: {report['status']}"
     )
-    if report["admin_comment"]:
-        text += f"\nКомментарий: {report['admin_comment']}"
+
     return text
 
 
@@ -356,10 +360,8 @@ def format_status_for_user(report, status_label):
     text = (
         f"✅ *{status_label} по миссии {report['mission_num']}* — {title}\n\n"
         f"Бонус: {total}₽ (стандартный {report['standard_bonus']}₽"
-        f"{' + доп. ' + str(report['extra_bonus']) + '₽' if report['extra_bonus'] else ''})\n"
+        f"{' + доп. ' + str(report['extra_bonus']) + '₽' if report['extra_bonus'] else ''})"
     )
-    if report["admin_comment"]:
-        text += f"\nКомментарий: {report['admin_comment']}"
     return text
 
 
@@ -382,26 +384,23 @@ def start(message):
     )
 
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    # верхний ряд
     btn_missions = types.KeyboardButton("📋 Миссии")
     btn_report = types.KeyboardButton("🧾 Шаблон отчёта")
     kb.row(btn_missions, btn_report)
 
-    # второй ряд
     btn_ideas = types.KeyboardButton("💡 Идея")
     btn_help = types.KeyboardButton("ℹ️ Помощь")
     kb.row(btn_ideas, btn_help)
 
-    # третий ряд — управление отчётом
     btn_start_report = types.KeyboardButton("📝 Начать отчёт")
     btn_done = types.KeyboardButton("✅ Готово")
     kb.row(btn_start_report, btn_done)
 
-    # четвёртый ряд — баланс
     btn_balance = types.KeyboardButton("💰 Баланс")
     kb.row(btn_balance)
 
     bot.send_message(message.chat.id, text, reply_markup=kb)
+
 
 # -----------------------------
 # 7. /help
@@ -435,8 +434,8 @@ def report_format(message):
         "*Что я сделал(а):*\n(шаги, что пробовал, инструменты)\n\n"
         "*Что получилось:*\n(ссылка, скрин, описание результата)\n\n"
         "*Что было сложно / чему научился(ась):*\n(2–5 предложений)\n\n"
-        "*Что хочу сделать дальше:*\n(что улучшить / попробовать)\n\n" 
-        "Скопируй этот шаблон в сообщение и заполни. После отправки напиши следующим сообщением 'Готово' и отчет отправится (бот напишет, что передал отчет)."
+        "*Что хочу сделать дальше:*\n(что улучшить / попробовать)\n\n"
+        "Скопируй этот шаблон в сообщение и заполни. После отправки напиши следующим сообщением 'Готово'."
     )
     bot.send_message(message.chat.id, text)
 
@@ -482,8 +481,8 @@ def balance_cmd(message):
     total = get_user_balance(message.from_user.id)
     bot.reply_to(message, f"💰 Принято бонусов: *{total}₽*")
 
-# кнопки
 
+# кнопки
 @bot.message_handler(func=lambda m: m.text == "📋 Миссии")
 def missions_button(message):
     missions_cmd(message)
@@ -508,6 +507,7 @@ def help_button(message):
 def balance_button(message):
     balance_cmd(message)
 
+
 @bot.message_handler(func=lambda m: m.text == "📝 Начать отчёт")
 def start_report_button(message):
     user_id = message.from_user.id
@@ -517,7 +517,6 @@ def start_report_button(message):
         bot.reply_to(message, "Сначала выбери миссию: `миссия <номер>`")
         return
 
-    # начинаем сбор отчёта, очищаем старый буфер
     state["collecting"] = True
     state["buffer"] = []
     bot.reply_to(
@@ -529,13 +528,10 @@ def start_report_button(message):
 
 @bot.message_handler(func=lambda m: m.text == "✅ Готово")
 def done_button(message):
-    # прокинем в общий обработчик, он уже умеет работать с 'готово'
-    # просто создадим фейковый text-сообщение 'Готово' с тем же объектом
-    # но на самом деле это уже и есть текст "✅ Готово", так что:
-    # мы просто переиспользуем существующую логику:
     fake_message = message
     fake_message.text = "Готово"
     collect_report(fake_message)
+
 
 # -----------------------------
 # 12. Выбор миссии "миссия N"
@@ -554,7 +550,6 @@ def choose_mission(message):
         bot.reply_to(message, "Такой миссии нет 👀")
         return
 
-    # только выбираем миссию, но не начинаем сбор отчёта
     user_states[message.from_user.id] = {
         "mission": num,
         "collecting": False,
@@ -568,47 +563,57 @@ def choose_mission(message):
         "Когда будешь готов(а) делать отчёт:\n"
         "• нажми кнопку *📝 Начать отчёт* — и присылай материалы\n"
         "• можешь пользоваться шаблоном: /report_format\n"
-        "• после того, как нажал *Начать отчёт* ты можешь возвращаться и редактировать отчет по этой миссии пока не нажмешь *Готово*.\n"
+        "• после того, как нажал *Начать отчёт*, ты можешь возвращаться и дополнять отчёт по этой миссии,\n"
+        "  пока не нажмёшь *Готово*.\n"
         "• чтобы отправить отчёт на проверку — нажми *✅ Готово* или напиши 'Готово'"
     )
     bot.reply_to(message, text)
 
 
 # -----------------------------
-# 13. Обработка текстов админа для комментариев
+# 13. Ввод от админа (ревью / финальный бонус)
 # -----------------------------
-@bot.message_handler(func=lambda m: m.chat.id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in admin_comment_state)
-def handle_admin_comment(message):
-    report_id = admin_comment_state.pop(ADMIN_CHAT_ID)
-    comment_text = message.text.strip()
-
-    # сохраняем комментарий
-    set_admin_comment(report_id, comment_text)
-
+@bot.message_handler(func=lambda m: m.chat.id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in admin_action_state)
+def handle_admin_input(message):
+    mode, report_id = admin_action_state.pop(ADMIN_CHAT_ID)
     report = get_report(report_id)
     if not report:
         bot.send_message(ADMIN_CHAT_ID, "Не нашёл отчёт 🤔")
         return
 
-    # ------------ Формируем текст комментария ------------
-    comment_block = f"\n\n💬 *Комментарий от босса:*\n{comment_text}"
+    mission = MISSIONS.get(report["mission_num"], {})
+    title = mission.get("title", f"Миссия {report['mission_num']}")
 
-    # ------------ Формируем обновлённый отчёт для админа ------------
-    admin_text = format_report_for_admin(report) + comment_block
+    if mode == "review":
+        review_text = message.text.strip()
+        set_admin_comment(report_id, review_text)
 
-    kb = make_admin_keyboard(report_id)
-
-    # отправляем админу
-    bot.send_message(ADMIN_CHAT_ID, "Комментарий сохранён ✅")
-    bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=kb)
-
-    # ------------ Формируем обновлённый отчёт для пользователя ------------
-    user_text = format_status_for_user(report, "Комментарий к миссии") + comment_block
-
-    try:
+        user_text = (
+            f"💬 *Ревью по миссии {report['mission_num']}* — {title}\n\n"
+            f"{review_text}"
+        )
         bot.send_message(report["chat_id"], user_text)
-    except Exception as e:
-        bot.send_message(ADMIN_CHAT_ID, f"⚠️ Не смог отправить комментарий пользователю:\n{e}")
+        bot.send_message(ADMIN_CHAT_ID, "Ревью отправлено пользователю ✅")
+
+    elif mode == "finish":
+        txt = message.text.strip()
+        try:
+            final_bonus = int(txt)
+        except ValueError:
+            bot.send_message(ADMIN_CHAT_ID, "Нужно ввести число, например: 250")
+            admin_action_state[ADMIN_CHAT_ID] = ("finish", report_id)
+            return
+
+        extra = final_bonus - report["standard_bonus"]
+        set_extra_and_status(report_id, extra, "accepted")
+        report = get_report(report_id)
+
+        user_text = (
+            f"✅ *Босс завершил миссию {report['mission_num']}* — {title}\n\n"
+            f"Итоговый бонус: {final_bonus}₽"
+        )
+        bot.send_message(report["chat_id"], user_text)
+        bot.send_message(ADMIN_CHAT_ID, f"Миссия #{report_id} закрыта, бонус {final_bonus}₽ ✅")
 
 
 # -----------------------------
@@ -618,54 +623,44 @@ def handle_admin_comment(message):
 def collect_report(message):
     user_id = message.from_user.id
 
-    # --- обработка ситуации, когда написали "Готово" вне отчёта ---
     if message.content_type == 'text' and message.text.lower() == "готово":
-        # нет активной миссии
         if user_id not in user_states:
             bot.reply_to(message, "❗ Сначала выбери миссию: напиши `миссия <номер>` 🙂")
             return
 
-        # миссия выбрана, но отчёт не начат
         if not user_states[user_id]["collecting"]:
             bot.reply_to(message, "❗ Чтобы завершить миссию, нажми кнопочку *📝 Начать отчёт*.")
             return
 
-    # если пользователь не в режиме отчёта — игнор
     if user_id not in user_states or not user_states[user_id]["collecting"]:
         return
 
-    # если написал "Готово" — создаём отчёт в БД, отправляем админам
     if message.content_type == 'text' and message.text.lower() == "готово":
         mission_num = user_states[user_id]["mission"]
         mission = MISSIONS.get(mission_num)
         standard_bonus = mission["bonus"] if mission else 0
         username = message.from_user.username or message.from_user.first_name
 
-        # создаём запись в БД
-        report_id = create_report(user_id, username, message.chat.id, mission_num, standard_bonus)
+        buffer_msgs = user_states[user_id]["buffer"]
+        text_parts = [m.text for m in buffer_msgs if m.content_type == "text"]
+        user_report_text = "\n".join(text_parts).strip() if text_parts else "(текстового отчёта нет)"
+
+        report_id = create_report(
+            user_id, username, message.chat.id,
+            mission_num, standard_bonus, user_report_text
+        )
 
         report = get_report(report_id)
         admin_text = format_report_for_admin(report)
         kb = make_admin_keyboard(report_id)
 
-        bot.send_message(
-            ADMIN_CHAT_ID,
-            admin_text,
-            reply_markup=kb
-        )
-
-        # Пересылаем все сообщения из буфера
-        for msg in user_states[user_id]["buffer"]:
-            try:
-                bot.forward_message(ADMIN_CHAT_ID, msg.chat.id, msg.message_id)
-            except Exception:
-                pass
+        bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=kb)
 
         bot.reply_to(message, "Готово! Я передал отчёт боссу 👌🔥")
         user_states.pop(user_id)
         return
 
-    # иначе — добавляем сообщение в отчёт
+    # просто добавляем сообщение в буфер отчёта
     user_states[user_id]["buffer"].append(message)
 
 
@@ -674,7 +669,6 @@ def collect_report(message):
 # -----------------------------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("report:"))
 def handle_report_callback(call):
-    # только админ может нажимать эти кнопки
     if call.from_user.id != ADMIN_CHAT_ID:
         bot.answer_callback_query(call.id, "Эта панель только для босса 😼")
         return
@@ -691,60 +685,14 @@ def handle_report_callback(call):
         bot.answer_callback_query(call.id, "Отчёт не найден")
         return
 
-    if action == "extra50":
-        add_extra_bonus(report_id, 50)
-        report = get_report(report_id)
-        bot.edit_message_text(
-            format_report_for_admin(report),
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=make_admin_keyboard(report_id)
-        )
-        bot.answer_callback_query(call.id, "Добавлено +50₽")
-    elif action == "extra100":
-        add_extra_bonus(report_id, 100)
-        report = get_report(report_id)
-        bot.edit_message_text(
-            format_report_for_admin(report),
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=make_admin_keyboard(report_id)
-        )
-        bot.answer_callback_query(call.id, "Добавлено +100₽")
-    # elif action == "comment":
-    #     admin_comment_state[call.from_user.id] = report_id
-    #     bot.answer_callback_query(call.id, "Напиши комментарий следующим сообщением")
-    #     bot.send_message(ADMIN_CHAT_ID, f"✍️ Напиши комментарий для отчёта #{report_id}")
-    elif action == "comment":
-        admin_comment_state[ADMIN_CHAT_ID] = report_id
-        bot.answer_callback_query(call.id, "Напиши комментарий следующим сообщением")
-        bot.send_message(ADMIN_CHAT_ID, f"✍️ Напиши комментарий для отчёта #{report_id}")
-    elif action == "accept":
-        update_status(report_id, "accepted")
-        report = get_report(report_id)
-        # отправляем пользователю
-        txt_user = format_status_for_user(report, "Миссия принята")
-        bot.send_message(report["chat_id"], txt_user)
-        # обновляем панель админа
-        bot.edit_message_text(
-            format_report_for_admin(report),
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=make_admin_keyboard(report_id)
-        )
-        bot.answer_callback_query(call.id, "Миссия принята ✅")
-    elif action == "redo":
-        update_status(report_id, "redo")
-        report = get_report(report_id)
-        txt_user = format_status_for_user(report, "Миссия отправлена на доработку")
-        bot.send_message(report["chat_id"], txt_user)
-        bot.edit_message_text(
-            format_report_for_admin(report),
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=make_admin_keyboard(report_id)
-        )
-        bot.answer_callback_query(call.id, "Отправлено на доработку 🔁")
+    if action == "review":
+        admin_action_state[ADMIN_CHAT_ID] = ("review", report_id)
+        bot.answer_callback_query(call.id, "Напиши ревью следующим сообщением")
+        bot.send_message(ADMIN_CHAT_ID, f"✍️ Напиши ревью для отчёта #{report_id}")
+    elif action == "finish":
+        admin_action_state[ADMIN_CHAT_ID] = ("finish", report_id)
+        bot.answer_callback_query(call.id, "Введи итоговый бонус числом")
+        bot.send_message(ADMIN_CHAT_ID, f"🏁 Введи итоговый бонус для отчёта #{report_id} (например, 250)")
     else:
         bot.answer_callback_query(call.id, "Неизвестное действие")
 
