@@ -577,30 +577,38 @@ def choose_mission(message):
 # -----------------------------
 # 13. Обработка текстов админа для комментариев
 # -----------------------------
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_USER_ID and m.from_user.id in admin_comment_state)
+@bot.message_handler(func=lambda m: m.chat.id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in admin_comment_state)
 def handle_admin_comment(message):
-    report_id = admin_comment_state.pop(message.from_user.id)
-    set_admin_comment(report_id, message.text)
+    report_id = admin_comment_state.pop(ADMIN_CHAT_ID)
+    comment_text = message.text.strip()
+
+    # сохраняем комментарий
+    set_admin_comment(report_id, comment_text)
+
     report = get_report(report_id)
     if not report:
-        bot.reply_to(message, "Не нашёл отчёт для комментария 🤔")
+        bot.send_message(ADMIN_CHAT_ID, "Не нашёл отчёт 🤔")
         return
 
-    # Обновляем сообщение для админа (присылаем новое)
-    bot.send_message(ADMIN_CHAT_ID, "Комментарий сохранён ✅")
-    admin_text = format_report_for_admin(report)
+    # ------------ Формируем текст комментария ------------
+    comment_block = f"\n\n💬 *Комментарий от босса:*\n{comment_text}"
+
+    # ------------ Формируем обновлённый отчёт для админа ------------
+    admin_text = format_report_for_admin(report) + comment_block
+
     kb = make_admin_keyboard(report_id)
+
+    # отправляем админу
+    bot.send_message(ADMIN_CHAT_ID, "Комментарий сохранён ✅")
     bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=kb)
 
-    # Можно сразу отправить обновление пользователю, если статус уже не pending
-    if report["status"] in ("accepted", "redo", "discuss"):
-        status_label = {
-            "accepted": "Миссия принята",
-            "redo": "Нужна доработка",
-            "discuss": "Нужно обсудить",
-        }.get(report["status"], "Статус обновлён")
-        user_text = format_status_for_user(report, status_label)
+    # ------------ Формируем обновлённый отчёт для пользователя ------------
+    user_text = format_status_for_user(report, "Комментарий к миссии") + comment_block
+
+    try:
         bot.send_message(report["chat_id"], user_text)
+    except Exception as e:
+        bot.send_message(ADMIN_CHAT_ID, f"⚠️ Не смог отправить комментарий пользователю:\n{e}")
 
 
 # -----------------------------
@@ -703,8 +711,12 @@ def handle_report_callback(call):
             reply_markup=make_admin_keyboard(report_id)
         )
         bot.answer_callback_query(call.id, "Добавлено +100₽")
+    # elif action == "comment":
+    #     admin_comment_state[call.from_user.id] = report_id
+    #     bot.answer_callback_query(call.id, "Напиши комментарий следующим сообщением")
+    #     bot.send_message(ADMIN_CHAT_ID, f"✍️ Напиши комментарий для отчёта #{report_id}")
     elif action == "comment":
-        admin_comment_state[call.from_user.id] = report_id
+        admin_comment_state[ADMIN_CHAT_ID] = report_id
         bot.answer_callback_query(call.id, "Напиши комментарий следующим сообщением")
         bot.send_message(ADMIN_CHAT_ID, f"✍️ Напиши комментарий для отчёта #{report_id}")
     elif action == "accept":
