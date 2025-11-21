@@ -667,7 +667,7 @@ def collect_report(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("report:"))
 def handle_report_callback(call):
     # только админ может нажимать эти кнопки
-    if call.from_user.id != ADMIN_USER_ID:
+    if call.from_user.id != ADMIN_CHAT_ID:
         bot.answer_callback_query(call.id, "Эта панель только для босса 😼")
         return
 
