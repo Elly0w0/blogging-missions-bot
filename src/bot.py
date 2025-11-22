@@ -7,8 +7,7 @@ from datetime import datetime
 # -----------------------------
 # 1. НАСТРОЙКИ
 # -----------------------------
-TOKEN = "8415966938:AAE2FZaLNWpfY5GsNMZpp8l_kCED4ysqPR0"
-#TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # теперь токен берётся из ENV
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # теперь токен берётся из ENV
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "1311098591"))
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "5054557414"))
 
