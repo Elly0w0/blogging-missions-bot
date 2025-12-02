@@ -1,13 +1,13 @@
 import telebot
 from telebot import types
+import sqlite3
 import os
 from datetime import datetime
-import psycopg2  # <-- вместо sqlite3
 
 # -----------------------------
 # 1. НАСТРОЙКИ
 # -----------------------------
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # теперь токен берётся из ENV
+TOKEN = "8415966938:AAE2FZaLNWpfY5GsNMZpp8l_kCED4ysqPR0"
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "1311098591"))
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "5054557414"))
 
@@ -16,15 +16,7 @@ if not TOKEN:
 
 bot = telebot.TeleBot(TOKEN)
 
-# используем DATABASE_URL для PostgreSQL
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL не найден! Добавь его в переменные окружения.")
-
-
-def get_conn():
-    return psycopg2.connect(DATABASE_URL)
-
+DB_PATH = "data.db"
 
 # -----------------------------
 # 2. МИССИИ
@@ -212,21 +204,21 @@ MISSIONS = {
 
 
 def init_db():
-    conn = get_conn()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS mission_reports (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
             username TEXT,
-            chat_id BIGINT,
+            chat_id INTEGER,
             mission_num INTEGER,
             standard_bonus INTEGER,
             extra_bonus INTEGER DEFAULT 0,
             status TEXT DEFAULT 'pending', -- pending / accepted / redo / discuss
             admin_comment TEXT,
-            created_at TIMESTAMP
+            created_at TEXT
         )
         """
     )
@@ -235,16 +227,16 @@ def init_db():
 
 
 def create_or_update_report(user_id, username, chat_id, mission_num, standard_bonus):
-    conn = get_conn()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
     # Проверяем, есть ли уже отчет по этой миссии от этого юзера
     cur.execute(
-        "SELECT id FROM mission_reports WHERE user_id = %s AND mission_num = %s",
+        "SELECT id FROM mission_reports WHERE user_id = ? AND mission_num = ?",
         (user_id, mission_num)
     )
     row = cur.fetchone()
-    now = datetime.now()
+    now = datetime.now().isoformat()
 
     if row:
         # Отчет уже есть — обновляем
@@ -252,26 +244,23 @@ def create_or_update_report(user_id, username, chat_id, mission_num, standard_bo
         cur.execute(
             """
             UPDATE mission_reports
-            SET username = %s, chat_id = %s, standard_bonus = %s,
+            SET username = ?, chat_id = ?, standard_bonus = ?,
                 extra_bonus = 0,
                 status = 'pending',
                 admin_comment = NULL,
-                created_at = %s
-            WHERE id = %s
+                created_at = ?
+            WHERE id = ?
             """,
             (username, chat_id, standard_bonus, now, report_id)
         )
     else:
         # Отчета нет — создаем
         cur.execute(
-            """
-            INSERT INTO mission_reports (user_id, username, chat_id, mission_num, standard_bonus, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id
-            """,
+            "INSERT INTO mission_reports (user_id, username, chat_id, mission_num, standard_bonus, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (user_id, username, chat_id, mission_num, standard_bonus, now)
         )
-        report_id = cur.fetchone()[0]
+        report_id = cur.lastrowid
 
     conn.commit()
     conn.close()
@@ -279,46 +268,44 @@ def create_or_update_report(user_id, username, chat_id, mission_num, standard_bo
 
 
 def update_status(report_id, status):
-    conn = get_conn()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("UPDATE mission_reports SET status = %s WHERE id = %s", (status, report_id))
+    cur.execute("UPDATE mission_reports SET status = ? WHERE id = ?", (status, report_id))
     conn.commit()
     conn.close()
 
-
 def set_total_bonus(report_id, amount):
-    conn = get_conn()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "UPDATE mission_reports SET standard_bonus = %s, extra_bonus = 0 WHERE id = %s",
+        "UPDATE mission_reports SET standard_bonus = ?, extra_bonus = 0 WHERE id = ?",
         (amount, report_id)
     )
     conn.commit()
     conn.close()
 
-
 def add_extra_bonus(report_id, amount):
-    conn = get_conn()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("UPDATE mission_reports SET extra_bonus = extra_bonus + %s WHERE id = %s", (amount, report_id))
+    cur.execute("UPDATE mission_reports SET extra_bonus = extra_bonus + ? WHERE id = ?", (amount, report_id))
     conn.commit()
     conn.close()
 
 
 def set_admin_comment(report_id, comment):
-    conn = get_conn()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("UPDATE mission_reports SET admin_comment = %s WHERE id = %s", (comment, report_id))
+    cur.execute("UPDATE mission_reports SET admin_comment = ? WHERE id = ?", (comment, report_id))
     conn.commit()
     conn.close()
 
 
 def get_report(report_id):
-    conn = get_conn()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
         "SELECT id, user_id, username, chat_id, mission_num, standard_bonus, extra_bonus, status, admin_comment "
-        "FROM mission_reports WHERE id = %s",
+        "FROM mission_reports WHERE id = ?",
         (report_id,)
     )
     row = cur.fetchone()
@@ -339,27 +326,25 @@ def get_report(report_id):
 
 
 def get_user_balance(user_id):
-    conn = get_conn()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT COALESCE(SUM(standard_bonus + extra_bonus), 0) FROM mission_reports WHERE user_id = %s AND status = 'accepted'",
+        "SELECT SUM(standard_bonus + extra_bonus) FROM mission_reports WHERE user_id = ? AND status = 'accepted'",
         (user_id,)
     )
     row = cur.fetchone()
     conn.close()
     return row[0] or 0
 
-
 def set_total_bonus(report_id, amount):
-    conn = get_conn()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "UPDATE mission_reports SET standard_bonus = %s, extra_bonus = 0 WHERE id = %s",
+        "UPDATE mission_reports SET standard_bonus = ?, extra_bonus = 0 WHERE id = ?",
         (amount, report_id)
     )
     conn.commit()
     conn.close()
-
 
 # -----------------------------
 # 4. СОСТОЯНИЕ ПОЛЬЗОВАТЕЛЕЙ
@@ -488,7 +473,7 @@ def report_format(message):
         "*Что получилось:*\n(ссылка, скрин, описание результата)\n\n"
         "*Что было сложно / чему научился(ась):*\n(2–5 предложений)\n\n"
         "*Что хочу сделать дальше:*\n(что улучшить / попробовать)\n\n" 
-        "Скопируй этот шаблон в сообщение и заполни. Если еще не нажал *начать миссию*, то не забудь нажать, а потом начинай отчет. После отправки отчета напиши следующим сообщением 'Готово' и отчет отправится (бот напишет, что передал отчет)."
+        "Скопируй этот шаблон в сообщение и заполни. Если еще не нажал *начать отчет*, то не забудь нажать, а потом начинай отчет. После отправки отчета напиши следующим сообщением 'Готово' и отчет отправится (бот напишет, что передал отчет)."
     )
     bot.send_message(message.chat.id, text)
 
@@ -502,6 +487,16 @@ def ideas_info(message):
         message,
         "💡 Напиши идею форматом:\n\n*идея: твой текст*\n\nЯ сохраню её 😎"
     )
+
+
+# @bot.message_handler(func=lambda m: m.text and m.text.lower().startswith("идея:"))
+# def collect_idea(message):
+#     idea_text = message.text[5:].strip()
+#     bot.send_message(
+#         ADMIN_CHAT_ID,
+#         f"💡 *ИДЕЯ от @{message.from_user.username or message.from_user.first_name}:*\n\n{idea_text}"
+#     )
+#     bot.reply_to(message, "Принято! Идея сохранена 💡🔥")
 
 
 # -----------------------------
@@ -550,7 +545,6 @@ def help_button(message):
 def balance_button(message):
     balance_cmd(message)
 
-
 @bot.message_handler(func=lambda m: m.text == "📝 Начать отчёт")
 def start_report_button(message):
     user_id = message.from_user.id
@@ -569,19 +563,42 @@ def start_report_button(message):
         "Кидай сюда текст, скрины, видео. В конце нажми *✅ Готово* или напиши 'Готово'."
     )
 
+# Альтернативные текстовые команды для старта отчёта
+def _is_start_report_text(message: telebot.types.Message) -> bool:
+    if not message.text:
+        return False
+    text = message.text.lower().strip()
+    text = text.replace("ё", "е")
 
-# Альтернативная текстовая команда
-@bot.message_handler(func=lambda m: m.text and m.text.lower().strip() == "начать отчет")
+    # убираем лишние знаки препинания по краям
+    while text and text[-1] in ".!?":
+        text = text[:-1].strip()
+
+    # 1) просто "начать"
+    if text == "начать":
+        return True
+
+    # 2) варианты типа "начать отчет", "начать писать отчет", "можно начать отчет"
+    #    ключевая пара: есть "начать" и есть "отчет"
+    if "начать" in text and "отчет" in text:
+        return True
+
+    return False
+
+
+@bot.message_handler(func=_is_start_report_text)
 def start_report_text(message):
     start_report_button(message)
 
-
 @bot.message_handler(func=lambda m: m.text == "✅ Готово")
 def done_button(message):
+    # прокинем в общий обработчик, он уже умеет работать с 'готово'
+    # просто создадим фейковый text-сообщение 'Готово' с тем же объектом
+    # но на самом деле это уже и есть текст "✅ Готово", так что:
+    # мы просто переиспользуем существующую логику:
     fake_message = message
     fake_message.text = "Готово"
     collect_report(fake_message)
-
 
 # -----------------------------
 # 12. Выбор миссии "миссия N"
@@ -612,7 +629,7 @@ def choose_mission(message):
         f"*Что нужно сделать:*\n{mission['task']}\n\n"
         f"*Бонус:* {mission['bonus']}₽\n\n"
         "Когда будешь готов(а) делать отчёт:\n"
-        "• нажми кнопку *📝 Начать отчёт* или напиши 'Начать' — и присылай материалы\n"
+        "• нажми кнопку *📝 Начать отчёт* или напиши 'Начать отчет' — и присылай материалы\n"
         "• можешь пользоваться шаблоном: /report_format\n"
         "• после того, как нажал *Начать отчёт* ты можешь возвращаться и редактировать отчет по этой миссии пока не нажмешь *Готово*.\n"
         "• чтобы отправить отчёт на проверку — нажми *✅ Готово* или напиши 'Готово'"
@@ -665,6 +682,7 @@ def handle_admin_text(message):
             bonus = int(text)
         except ValueError:
             bot.send_message(ADMIN_CHAT_ID, "Нужно ввести число, например: 350")
+            # возвращаем состояние, чтобы не потерять
             admin_finish_state[chat_id] = report_id
             return
 
@@ -675,14 +693,14 @@ def handle_admin_text(message):
             bot.send_message(ADMIN_CHAT_ID, "Не нашёл отчёт 🤔")
             return
 
-        mission_num = report["mission_num"]
-
+        # сообщение пользователю
         user_msg = (
             f"✅ Босс завершил миссию {report['mission_num']}!\n"
             f"Ты получаешь бонус *{bonus}₽* 🎉"
         )
         bot.send_message(report["chat_id"], user_msg)
 
+        # сообщение админу
         bot.send_message(ADMIN_CHAT_ID, f"Миссия #{mission_num} закрыта. Итоговый бонус: {bonus}₽ ✅")
 
 
@@ -705,38 +723,53 @@ def collect_report(message):
             bot.reply_to(message, "Принято! Идея сохранена 💡🔥")
             return
 
-    # --- если это текст "готово" вне отчёта ---
-    if message.content_type == 'text' and message.text.lower() == "готово":
-        if user_id not in user_states:
-            bot.reply_to(message, "❗ Сначала выбери миссию: напиши `миссия <номер>` 🙂")
-            return
+    is_gotovo = (message.content_type == 'text'
+                 and message.text
+                 and message.text.lower().strip() == "готово")
 
-        if len(user_states[user_id]["buffer"]) == 0:
+    # --- если написали "Готово" вообще без миссии / отчёта ---
+    if is_gotovo and user_id not in user_states:
+        bot.reply_to(message, "❗ Сначала выбери миссию: напиши `миссия <номер>` 🙂")
+        return
+
+    if user_id in user_states:
+        state = user_states[user_id]
+    else:
+        state = None
+
+    # есть миссия, но отчёт ещё не начат
+    if is_gotovo and state and not state.get("collecting", False):
+        bot.reply_to(message, "❗ Чтобы завершить миссию, нажми кнопочку *📝 Начать отчёт*.")
+        return
+
+    # если пользователь не в режиме отчёта — игнор (идея уже обработана выше)
+    if not state or not state.get("collecting", False):
+        return
+
+    # здесь точно есть state и collecting = True
+
+    # если написал "Готово" — создаём/обновляем отчёт в БД, отправляем админу
+    if is_gotovo:
+        # запрет "готово" без содержимого отчёта
+        if not state["buffer"]:
             bot.reply_to(message, "⚠️ Ты ещё не написал ничего в отчёт! Сначала добавь текст или файл.")
             return
 
-        if not user_states[user_id]["collecting"]:
-            bot.reply_to(message, "❗ Чтобы завершить миссию, нажми кнопочку *📝 Начать отчёт*.")
-            return
-
-    if user_id not in user_states or not user_states[user_id]["collecting"]:
-        return
-
-    if message.content_type == 'text' and message.text.lower() == "готово":
-        mission_num = user_states[user_id]["mission"]
+        mission_num = state["mission"]
         mission = MISSIONS.get(mission_num)
         standard_bonus = mission["bonus"] if mission else 0
         username = message.from_user.username or message.from_user.first_name
 
+        # создаём или обновляем запись в БД
         report_id = create_or_update_report(user_id, username, message.chat.id, mission_num, standard_bonus)
         report = get_report(report_id)
 
+        # Собираем текст отчёта из всех текстовых сообщений в буфере
         text_parts = []
-        for msg in user_states[user_id]["buffer"]:
-            if msg.content_type == 'text':
+        for msg in state["buffer"]:
+            if msg.content_type == 'text' and msg.text:
                 text_parts.append(msg.text.strip())
         report_body = "\n\n".join(text_parts).strip()
-
         if not report_body:
             report_body = "_(в отчёте нет текстовой части, только медиа)_"
 
@@ -747,7 +780,6 @@ def collect_report(message):
             f"📩 *ОТЧЁТ ПО МИССИИ {mission_num}* — {mission_title}\n"
             f"От @{username or 'без_ника'} (id: {user_id})\n\n"
             f"{report_body}\n\n"
-            f"Комментарий от босса 😎: \n"
             f"Стандартный бонус: {report['standard_bonus']}₽\n"
             f"Доп. бонус: {report['extra_bonus']}₽\n"
             f"Итого: {total}₽\n"
@@ -756,18 +788,27 @@ def collect_report(message):
 
         kb = make_admin_keyboard(report_id)
 
+        # 1) текстовый отчёт
         bot.send_message(
             ADMIN_CHAT_ID,
             admin_text,
             reply_markup=kb
         )
 
+        # 2) форвардим все сообщения с медиа целиком
+        for msg in state["buffer"]:
+            if msg.content_type in ['photo', 'video', 'voice', 'document']:
+                try:
+                    bot.forward_message(ADMIN_CHAT_ID, msg.chat.id, msg.message_id)
+                except Exception:
+                    pass
+
         bot.reply_to(message, "Готово! Я передал отчёт боссу 👌🔥")
         user_states.pop(user_id)
         return
 
-    user_states[user_id]["buffer"].append(message)
-
+    # иначе — просто добавляем сообщение в буфер отчёта
+    state["buffer"].append(message)
 
 # -----------------------------
 # X. Команда /set_status МИССИЯ СТАТУС
@@ -784,9 +825,10 @@ def admin_set_status(message):
         bot.reply_to(message, "Формат: /set_status <миссия> <status>")
         return
 
-    conn = get_conn()
+    # ищем отчёт юзера
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT id, chat_id FROM mission_reports WHERE mission_num = %s", (mission_num,))
+    cur.execute("SELECT id, chat_id FROM mission_reports WHERE mission_num = ?", (mission_num,))
     rows = cur.fetchall()
     conn.close()
 
@@ -817,9 +859,9 @@ def admin_set_bonus(message):
         bot.reply_to(message, "Формат: /set_bonus <миссия> <рубли>")
         return
 
-    conn = get_conn()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT id, chat_id FROM mission_reports WHERE mission_num = %s", (mission_num,))
+    cur.execute("SELECT id, chat_id FROM mission_reports WHERE mission_num = ?", (mission_num,))
     rows = cur.fetchall()
     conn.close()
 
@@ -833,7 +875,6 @@ def admin_set_bonus(message):
 
     bot.reply_to(message, f"Бонус обновлён у {len(rows)} отчётов.")
 
-
 # -----------------------------
 # X. Обработка лишних сообщений от пользователя
 # -----------------------------
@@ -841,20 +882,26 @@ def admin_set_bonus(message):
 def fallback_handler(message):
     user_id = message.from_user.id
 
+    # если это сообщение уже обработано в других хендлерах — игнор
     text = message.text.strip().lower()
 
+    # команды пропускаем
     if text.startswith("/") or text in ["📋 миссии", "🧾 шаблон отчёта", "💡 идея", "ℹ️ помощь", "💰 баланс"]:
         return
 
+    # кнопки пропускаем
     if text in ["📝 начать отчёт", "✅ готово"]:
         return
 
+    # идеи пропускаем
     if text.startswith("идея:"):
         return
 
+    # отчётный режим
     if user_id in user_states and user_states[user_id]["collecting"]:
-        return
+        return  # это отчёт → норм
 
+    # иначе — ругаемся :)
     bot.reply_to(
         message,
         "Я не понял 🤔\n\n"
@@ -871,6 +918,7 @@ def fallback_handler(message):
 # -----------------------------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("report:"))
 def handle_report_callback(call):
+    # только админ может нажимать эти кнопки
     if call.from_user.id != ADMIN_CHAT_ID:
         bot.answer_callback_query(call.id, "Эта панель только для босса 😼")
         return
@@ -890,6 +938,7 @@ def handle_report_callback(call):
     mission_num = report["mission_num"]
 
     if action == "review":
+        # начать ревью
         admin_review_state[ADMIN_CHAT_ID] = report_id
         bot.answer_callback_query(call.id, "Напиши ревью следующим сообщением")
         bot.send_message(
@@ -898,6 +947,7 @@ def handle_report_callback(call):
         )
 
     elif action == "finish":
+        # завершить миссию — ждём итоговый бонус
         admin_finish_state[ADMIN_CHAT_ID] = report_id
         bot.answer_callback_query(call.id, "Введи итоговый бонус числом")
         bot.send_message(
