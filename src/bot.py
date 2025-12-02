@@ -9,7 +9,7 @@ from datetime import datetime
 # -----------------------------
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "1311098591"))
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "5054557414"))
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
 
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN не найден! Установи переменную окружения.")
